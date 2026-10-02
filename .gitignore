@@ -1,0 +1,36 @@
+# Dependencies and build output
+node_modules/
+npm-debug.log*
+coverage/
+
+# Local environment files (commit .env.example only)
+.env
+.env.*
+!.env.example
+
+# OpenTofu / Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+*.auto.tfvars
+terraform.tfvars
+
+# Bicep build output
+project2/main.json
+
+# Scan reports
+*.sarif
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
