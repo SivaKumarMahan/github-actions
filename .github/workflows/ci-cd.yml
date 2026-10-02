@@ -1,67 +1,137 @@
-name: CI/CD Pipeline
+# project1: test the Node.js app, push the image to Docker Hub, deploy it to an Azure VM over SSH.
+# Third-party actions are pinned to a full commit SHA (the tag is in the comment).
+name: CI/CD Pipeline (project1)
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+    paths:
+      - 'project1/**'
+      - '.github/workflows/ci-cd.yml'
+  pull_request:
+    paths:
+      - 'project1/**'
+      - '.github/workflows/ci-cd.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE_NAME: github-actions
-  DOCKER_REGISTRY: docker.io
+  CONTAINER_NAME: github-actions
+
+defaults:
+  run:
+    working-directory: project1
 
 jobs:
-  build-and-deploy:
+  test:
+    name: Test and build image
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     steps:
-    # 1️⃣ Checkout code
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    # 2️⃣ Set up Node.js
-    - name: Set up Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '20'
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: project1/package-lock.json
 
-    # 3️⃣ Install dependencies
-    - name: Install dependencies
-      run: npm ci
-      working-directory: ./  # adjust if your package.json is in a subfolder
+      - name: Install dependencies
+        run: npm ci
 
-    # 4️⃣ Build Docker image and push to Docker Hub
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Run tests
+        run: npm test
 
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v4
-      with:
-        context: .
-        push: true
-        tags: ${{ env.DOCKER_REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+      - name: Build Docker image (no push)
+        run: docker build -t "${IMAGE_NAME}:ci" .
 
-    # 5️⃣ Deploy to VM via SSH
-    - name: Deploy to server via SSH
-      uses: appleboy/ssh-action@v0.1.7
-      with:
-        host: ${{ secrets.SERVER_HOST }}
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        port: 22
-        script: |
-          # Log in to DockerHub on the remote VM
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+  # Gate: the deploy job only runs when the Docker Hub and SSH secrets exist,
+  # so forks and fresh clones do not get a red pipeline.
+  check-secrets:
+    name: Check deploy secrets
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        working-directory: .
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          if [ -n "$DOCKERHUB_TOKEN" ] && [ -n "$SSH_PRIVATE_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Deploy skipped: DOCKERHUB_TOKEN or SSH_PRIVATE_KEY secret is not set."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
 
-          # Pull the latest image
-          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/github-actions:latest
+  build-and-deploy:
+    name: Push image and deploy to VM
+    needs: [test, check-secrets]
+    if: needs.check-secrets.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-          # Stop & remove old container
-          docker stop github-actions || true
-          docker rm github-actions || true
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-          # Run new container
-          docker run -d --name github-actions -p 80:3000 ${{ secrets.DOCKERHUB_USERNAME }}/github-actions:latest
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      # Push an immutable tag (commit SHA) and keep "latest" as a moving pointer.
+      - name: Build and push Docker image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./project1
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Deploy the exact SHA tag, so a rerun of an old workflow deploys the old build.
+      - name: Deploy to server via SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          envs: IMAGE,CONTAINER_NAME,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
+          script: |
+            set -euo pipefail
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+            docker pull "$IMAGE"
+            docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            docker run -d --name "$CONTAINER_NAME" --restart unless-stopped \
+              --memory 256m --cpus 0.5 -p 80:3000 "$IMAGE"
+            docker logout
+            # Fail the job if the new container does not answer.
+            for i in $(seq 1 10); do
+              if curl -fsS http://localhost/health; then exit 0; fi
+              sleep 3
+            done
+            echo "Health check failed"; docker logs "$CONTAINER_NAME"; exit 1
