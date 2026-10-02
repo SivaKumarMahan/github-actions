@@ -1,5 +1,7 @@
 # Project 3: ECS Fargate deploy with GitHub Actions, OIDC and OpenTofu
 
+<!-- cspell:words HEALTHCHECK Kumar Mahan roleprd rolestg rollouts SARIF shellcheck tfstate tftest tfvars -->
+
 ## Goal
 
 Ship a small Node.js container to **Amazon ECS on Fargate**, behind an **Application Load Balancer**, with:
