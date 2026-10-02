@@ -1,37 +1,94 @@
-# Using OIDC for authentication
-name: Deploy Bicep Template
+# project2: validate main.bicep on every change, deploy it to Azure with OIDC (no client secret).
+name: Deploy Bicep Template (project2)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
     paths:
-      - 'project2/**'   # trigger only when files in project2 change
+      - 'project2/**'
+      - '.github/workflows/deploy-bicep.yml'
+  pull_request:
+    paths:
+      - 'project2/**'
+      - '.github/workflows/deploy-bicep.yml'
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
+env:
+  TEMPLATE_FILE: project2/main.bicep
+  # Set the repository variable AZURE_RESOURCE_GROUP to override the default.
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || 'aimsplus' }}
+
+jobs:
+  validate:
+    name: Build and lint Bicep
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Needs no Azure login: it compiles the template to ARM JSON and runs the linter.
+      - name: Build Bicep Template
+        run: |
+          az bicep install
+          az bicep build --file "$TEMPLATE_FILE" --stdout > /dev/null
+          az bicep lint --file "$TEMPLATE_FILE"
+
+  deploy:
+    name: Deploy to Azure
+    needs: validate
+    # Deploy only from main, and only when the OIDC app registration is configured.
+    # No "environment:" here on purpose: it would change the OIDC subject claim
+    # and break the federated credential, which trusts "branch: main".
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # needed to request the OIDC token for azure/login
+    steps:
+      - name: Check Azure secrets
+        id: check
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          if [ -n "$AZURE_CLIENT_ID" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Deploy skipped: AZURE_CLIENT_ID secret is not set."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout Repository
+        if: steps.check.outputs.ready == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Azure CLI Login via OIDC
-        uses: azure/login@v2
+        if: steps.check.outputs.ready == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Validate Bicep Template
-        run: az bicep build --file project2/main.bicep
+      - name: Preview changes (what-if)
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file "$TEMPLATE_FILE"
 
       - name: Deploy Bicep Template to Azure
+        if: steps.check.outputs.ready == 'true'
         run: |
           az deployment group create \
-            --resource-group aimsplus \
-            --template-file project2/main.bicep
+            --resource-group "$RESOURCE_GROUP" \
+            --name "project2-${GITHUB_RUN_NUMBER}" \
+            --template-file "$TEMPLATE_FILE"
