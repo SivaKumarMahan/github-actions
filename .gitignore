@@ -23,6 +23,8 @@ override.tf.json
 terraform.rc
 *.auto.tfvars
 terraform.tfvars
+# Real backend settings (commit backend.example.hcl only)
+backend.hcl
 
 # Bicep build output
 project2/main.json

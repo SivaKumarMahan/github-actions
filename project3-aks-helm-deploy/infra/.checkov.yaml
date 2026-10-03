@@ -1,0 +1,24 @@
+# Checkov settings for project3 infra. Used by tofu-plan-azure.yml and locally:
+#   checkov -d . --config-file .checkov.yaml
+# Every skip is a conscious trade-off for this demo, with the reason next to it.
+# Remove a line when you close the gap.
+framework:
+  - terraform
+compact: true
+quiet: true
+skip-check:
+  # AKS
+  - CKV_AZURE_115 # Private cluster: GitHub-hosted runners need a public API server. Use self-hosted runners in the VNet to go private.
+  - CKV_AZURE_117 # Customer-managed disk encryption set: platform-managed keys are enough here; CMK needs Key Vault + DES.
+  - CKV_AZURE_227 # Encryption at host: needs the EncryptionAtHost feature registered on the subscription first.
+  - CKV_AZURE_226 # Ephemeral OS disks: the default VM size (D2s_v5) has no local disk. Use a "ds" size to turn it on.
+  # ACR: these are Premium-only features; this stack uses Standard to keep cost low.
+  - CKV_AZURE_139 # Public network access: needed by GitHub-hosted runners (Premium + private endpoint otherwise).
+  - CKV_AZURE_165 # Geo-replication: single region demo.
+  - CKV_AZURE_233 # Zone redundancy: Premium only.
+  - CKV_AZURE_237 # Dedicated data endpoints: Premium only.
+  - CKV_AZURE_167 # Retention policy for untagged manifests: Premium only.
+  - CKV_AZURE_166 # Quarantine: images are scanned by Trivy in the pipeline before the push.
+  - CKV_AZURE_164 # Content trust (DCT) is deprecated by Azure; use Notation signing instead.
+  # Entra ID
+  - CKV_AZURE_249 # False positive: subjects come from for_each locals that Checkov cannot resolve. tofu test asserts the exact subjects.
