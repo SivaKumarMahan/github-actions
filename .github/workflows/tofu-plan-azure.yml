@@ -1,0 +1,230 @@
+# project3 infra (Azure): fmt, validate, unit tests and Checkov on every PR (no Azure
+# needed), then "tofu plan" with the read-only plan identity, posted as a PR comment.
+# A weekly scheduled run plans main with -detailed-exitcode and fails on drift.
+#
+# The plan job runs only when the repository variables AZURE_CLIENT_ID_PLAN and
+# TFSTATE_STORAGE_ACCOUNT are set, and never for PRs from forks (no OIDC token).
+name: OpenTofu Plan (project3, Azure)
+
+on:
+  pull_request:
+    paths:
+      - 'project3-aks-helm-deploy/infra/**'
+      - '.github/workflows/tofu-plan-azure.yml'
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC: drift detection
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TOFU_VERSION: 1.12.2
+  WORKDIR: project3-aks-helm-deploy/infra
+
+jobs:
+  checks:
+    name: fmt / validate / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ${{ env.WORKDIR }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - name: tofu fmt
+        run: tofu fmt -check -recursive -diff
+
+      - name: tofu init (no backend)
+        run: tofu init -backend=false -input=false
+
+      - name: tofu validate
+        run: tofu validate
+
+      # Plans the stack against mocked azurerm/azuread providers (tests/*.tftest.hcl).
+      - name: tofu test
+        run: tofu test
+
+  checkov:
+    name: Checkov
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Fails the job on any failed check. Accepted risks are listed, with a reason,
+      # in infra/.checkov.yaml.
+      - name: Checkov scan
+        uses: bridgecrewio/checkov-action@cc0e17d456ef1713bbfd963ebac19dc776775cb2 # v12.3128.0
+        with:
+          directory: ${{ env.WORKDIR }}
+          config_file: ${{ env.WORKDIR }}/.checkov.yaml
+          framework: terraform
+          output_format: cli,sarif
+          output_file_path: console,checkov-results.sarif
+
+      - name: Upload SARIF to GitHub code scanning
+        if: always() && hashFiles('checkov-results.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: checkov-results.sarif
+          category: checkov-project3
+
+  plan:
+    name: plan
+    needs: checks
+    if: >-
+      vars.AZURE_CLIENT_ID_PLAN != '' && vars.TFSTATE_STORAGE_ACCOUNT != '' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # OIDC token for the read-only plan identity
+      pull-requests: write # post the plan as a comment
+    defaults:
+      run:
+        working-directory: ${{ env.WORKDIR }}
+    env:
+      # The azurerm/azuread providers and the azurerm backend log in with the
+      # GitHub OIDC token themselves. Subject: pull_request, or ref:refs/heads/main.
+      ARM_USE_OIDC: 'true'
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP || 'rg-tfstate' }}
+      TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+      TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+      TFSTATE_KEY: project3-aks.tfstate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      # The real (non-secret) inputs live in git, so the plan matches what was applied.
+      - name: Check live.tfvars
+        run: |
+          if [ ! -f live.tfvars ]; then
+            echo "::error::$WORKDIR/live.tfvars is missing. Copy example.tfvars, set your values and commit it."
+            exit 1
+          fi
+
+      - name: tofu init
+        run: |
+          tofu init -input=false \
+            -backend-config="resource_group_name=${TFSTATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TFSTATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TFSTATE_CONTAINER}" \
+            -backend-config="key=${TFSTATE_KEY}"
+
+      # -lock=false: a read-only plan must not take (or need rights for) the state lease.
+      # Exit codes with -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes.
+      - name: tofu plan
+        id: plan
+        run: |
+          set +e
+          tofu plan -input=false -no-color -lock=false -detailed-exitcode \
+            -var-file=live.tfvars -out=tfplan > plan.log 2>&1
+          code=$?
+          set -e
+          if [ "$code" -eq 1 ]; then
+            cp plan.log plan.txt
+          else
+            tofu show -no-color tfplan > plan.txt
+          fi
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Post plan as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PLAN_FILE: ${{ env.WORKDIR }}/plan.txt
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- tofu-plan:project3-aks -->';
+            let plan = fs.readFileSync(process.env.PLAN_FILE, 'utf8');
+            const max = 60000; // GitHub comments are limited to 65536 characters
+            if (plan.length > max) {
+              plan = plan.slice(0, max) + '\n... (truncated, see the job log for the full plan)';
+            }
+            const status = { '0': 'no changes', '2': 'changes' }[process.env.PLAN_EXITCODE] || 'FAILED';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              marker,
+              `### OpenTofu plan (project3 AKS): ${status}`,
+              `Commit ${context.sha.substring(0, 7)} - [workflow run](${runUrl})`,
+              '<details><summary>Show plan</summary>',
+              '',
+              '```text',
+              plan,
+              '```',
+              '</details>',
+            ].join('\n');
+
+            // Update the previous plan comment instead of adding a new one.
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Summary
+        if: always()
+        env:
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        run: |
+          {
+            echo "### OpenTofu plan (project3 AKS)"
+            case "$PLAN_EXITCODE" in
+              0) echo "No changes. Infrastructure matches the code." ;;
+              2) echo "Changes found. See the plan below." ;;
+              *) echo "Plan failed. See the job log." ;;
+            esac
+            if [ -f plan.txt ]; then
+              echo '```text'
+              head -c 60000 plan.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if plan failed
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "::error::tofu plan failed"
+          exit 1
+
+      # Outside a PR (schedule, manual run on main) any change means drift:
+      # someone changed Azure by hand, or main has code that was never applied.
+      - name: Fail on drift
+        if: github.event_name != 'pull_request' && steps.plan.outputs.exitcode == '2'
+        run: |
+          echo "::error::Drift detected: Azure does not match main. Review the plan in the job summary."
+          exit 1
