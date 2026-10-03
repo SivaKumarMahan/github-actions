@@ -1,0 +1,19 @@
+# Staging: small and cheap, still two replicas so rolling updates and the PDB behave like production.
+app:
+  message: "Hello from AKS staging!"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 3
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

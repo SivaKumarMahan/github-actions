@@ -1,0 +1,9 @@
+apiVersion: v2
+name: p3-aks-app
+description: Small Node.js web app for AKS, with probes, autoscaling and a PodDisruptionBudget.
+type: application
+# Chart version. Bump it when the templates change.
+version: 0.1.0
+# Default app version. The pipeline overrides image.tag with the commit SHA.
+appVersion: "1.0.0"
+kubeVersion: ">=1.30.0-0"

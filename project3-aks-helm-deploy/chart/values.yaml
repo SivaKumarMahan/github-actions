@@ -1,0 +1,117 @@
+# Default values. values-staging.yaml and values-production.yaml override them.
+
+image:
+  # ACR image, for example myacr.azurecr.io/p3-aks-app. The pipeline sets it.
+  repository: p3-aks-app
+  # The pipeline sets the commit SHA. Never deploy "latest".
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Used only when autoscaling is off. With the HPA on, the HPA owns the replica count.
+replicaCount: 2
+
+nameOverride: ""
+fullnameOverride: ""
+
+app:
+  message: "Hello from AKS!"
+  port: 3000
+
+service:
+  type: ClusterIP
+  port: 80
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Microsoft Entra Workload ID. Set clientId to the client ID of the user-assigned
+# managed identity (infra output app_identity_client_ids) when the app needs Azure access.
+workloadIdentity:
+  enabled: false
+  clientId: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+# Startup probe gives the app time to boot; liveness restarts a stuck container;
+# readiness removes a pod from the Service while it cannot serve.
+probes:
+  startup:
+    httpGet:
+      path: /health
+      port: http
+    periodSeconds: 2
+    failureThreshold: 30
+  liveness:
+    httpGet:
+      path: /health
+      port: http
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    httpGet:
+      path: /health
+      port: http
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+podDisruptionBudget:
+  enabled: true
+  # Set minAvailable or maxUnavailable (for example maxUnavailable: 1), not both.
+  minAvailable: 1
+
+# Zero-downtime rolling update: start a new pod before an old one stops.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 0
+
+# Spread pods over nodes and availability zones when possible.
+topologySpread:
+  enabled: true
+
+terminationGracePeriodSeconds: 30
+# Wait a few seconds before SIGTERM so the endpoint is removed from the Service first.
+preStopSleepSeconds: 5
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Image for the "helm test" smoke test pod.
+smokeTest:
+  image: curlimages/curl:8.22.0

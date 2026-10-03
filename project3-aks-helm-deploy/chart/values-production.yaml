@@ -1,0 +1,21 @@
+# Production: more replicas and headroom. The HPA scales between 3 and 10 pods,
+# and the AKS cluster autoscaler adds user-pool nodes when pods do not fit.
+app:
+  message: "Hello from AKS production!"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 65
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2

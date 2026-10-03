@@ -1,0 +1,48 @@
+# Smoke test, run by "helm test": calls /health through the Service and checks
+# that the running pods report the image tag that was just deployed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "app.fullname" . }}-smoke-test
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    # Keep the pod after the run so "helm test --logs" can read it; delete it before the next run.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: smoke-test
+      image: {{ .Values.smokeTest.image | quote }}
+      env:
+        - name: URL
+          value: "http://{{ include "app.fullname" . }}:{{ .Values.service.port }}/health"
+        - name: EXPECTED_VERSION
+          value: {{ include "app.imageTag" . | quote }}
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          body=$(curl -fsS --retry 10 --retry-delay 3 --retry-all-errors --max-time 5 "$URL")
+          echo "$body"
+          echo "$body" | grep -q "\"version\":\"$EXPECTED_VERSION\"" || {
+            echo "expected version $EXPECTED_VERSION"; exit 1; }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
