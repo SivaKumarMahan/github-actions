@@ -327,4 +327,4 @@ Not tested: the push to Docker Hub and the SSH deploy (need the real secrets and
   non-root user, `HEALTHCHECK`, and an exec-form `CMD` that runs `node` directly, so SIGTERM reaches the app
   and `docker stop` is graceful.
 - **Trade-off: push-based SSH deploy.** It is simple but needs port 22 open to GitHub runners and a
-  long-lived SSH key in GitHub. Project 3 shows an alternative without SSH or stored keys: OIDC to AWS and ECS rolling deploys.
+  long-lived SSH key in GitHub. Project 2 shows the alternative without stored keys: OIDC to Azure.
